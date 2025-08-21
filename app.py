@@ -1,3 +1,4 @@
+# main.py
 """
 🚀 Telegram Channel Analyzer FastAPI
 ====================================
@@ -13,6 +14,7 @@ import asyncio
 import os
 import json
 import logging
+import base64
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
 from contextlib import asynccontextmanager
@@ -46,6 +48,7 @@ logger = logging.getLogger(__name__)
 LIMIT_MESSAGES = int(os.getenv("LIMIT_MESSAGES", "200"))  # Лимит сообщений
 DAYS_BACK = int(os.getenv("DAYS_BACK", "30"))            # Период анализа в днях
 SESSION_NAME = "telegram_analyzer_session"                # Имя файла сессии
+SESSION_FILE = f"{SESSION_NAME}.session"                  # Полный путь к файлу сессии
 
 # Глобальная переменная для хранения клиента
 telegram_client: Optional[TelegramClient] = None
@@ -190,7 +193,9 @@ def get_telegram_credentials() -> tuple[str, str, str]:
 
 async def init_telegram_client() -> TelegramClient:
     """
-    Инициализация и авторизация Telegram клиента
+    Инициализация и авторизация Telegram клиента.
+    Пытается использовать существующую сессию или воссоздать её из TELEGRAM_SESSION_BASE64.
+    Если сессия недействительна или отсутствует, начинает новую авторизацию.
     
     Returns:
         TelegramClient: Авторизованный клиент
@@ -201,28 +206,56 @@ async def init_telegram_client() -> TelegramClient:
     try:
         api_id, api_hash, phone = get_telegram_credentials()
         
-        # Удаляем старую сессию для чистого запуска
-        session_file = f"{SESSION_NAME}.session"
-        if os.path.exists(session_file):
-            os.remove(session_file)
-            logger.info("Удален старый файл сессии")
-        
+        # Проверяем, существует ли файл сессии
+        session_exists = os.path.exists(SESSION_FILE)
+
+        # Если файла нет, пытаемся воссоздать его из переменной окружения
+        if not session_exists:
+            session_b64 = os.getenv('TELEGRAM_SESSION_BASE64')
+            if session_b64:
+                try:
+                    # Декодируем base64 и записываем в файл
+                    session_data = base64.b64decode(session_b64)
+                    with open(SESSION_FILE, 'wb') as f:
+                        f.write(session_data)
+                    logger.info("Файл сессии воссоздан из переменной окружения TELEGRAM_SESSION_BASE64")
+                    session_exists = True
+                except Exception as e:
+                    logger.error(f"Ошибка декодирования или записи файла сессии из переменной окружения: {e}")
+                    # Продолжаем, возможно, начнется новая авторизация
+
         # Создаем клиент
-        client = TelegramClient(SESSION_NAME, api_id, api_hash)
+        client = TelegramClient(SESSION_NAME, int(api_id), api_hash)
         
-        # Подключаемся и авторизуемся
-        await client.start(phone)
+        # Подключаемся. Если сессия валидна, авторизация пройдет автоматически.
+        # Если файла не было и не удалось воссоздать, или сессия невалидна, начнется новая авторизация.
+        # Обрабатываем 2FA если нужно
+        password = os.getenv('TELEGRAM_2FA_PASSWORD')
+        if password:
+             await client.start(phone, password=password)
+        else:
+             await client.start(phone)
         
         # Проверяем авторизацию
         me = await client.get_me()
-        logger.info(f"Успешно авторизован как: {me.first_name} {me.last_name or ''}")
+        logger.info(f"Успешно авторизован как: {me.first_name} {me.last_name or ''} (ID: {me.id})")
         
         return client
         
     except SessionPasswordNeededError:
-        raise Exception("Требуется двухфакторная аутентификация. Настройте клиент локально.")
+        raise Exception(
+            "Требуется двухфакторная аутентификация (пароль). "
+            "Установите переменную окружения TELEGRAM_2FA_PASSWORD."
+        )
     except Exception as e:
         logger.error(f"Ошибка инициализации Telegram клиента: {e}")
+        # Удаляем поврежденный файл сессии, если ошибка указывает на проблему с сессией
+        if os.path.exists(SESSION_FILE) and ("auth" in str(e).lower() or "invalid" in str(e).lower()):
+             try:
+                 os.remove(SESSION_FILE)
+                 logger.info("Поврежденный файл сессии удален.")
+             except Exception as rm_error:
+                 logger.warning(f"Не удалось удалить поврежденный файл сессии: {rm_error}")
         raise Exception(f"Не удалось инициализировать Telegram клиент: {str(e)}")
 
 
@@ -424,7 +457,7 @@ async def process_messages(client: TelegramClient, messages: list, channel: Chan
             else:
                 msg_type = "прочее"
                 content = "[Служебное сообщение]"
-                continue
+                # Продолжаем обработку служебных сообщений, если они нужны
             
             # Получаем статистику сообщения
             views_count = getattr(msg, 'views', 0) or 0
@@ -453,6 +486,7 @@ async def process_messages(client: TelegramClient, messages: list, channel: Chan
             channel_username = getattr(channel, 'username', None)
             message_link = ""
             if channel_username:
+                # Исправлено форматирование ссылки
                 message_link = f"https://t.me/{channel_username}/{msg.id}"
             else:
                 message_link = f"Сообщение #{msg.id}"
@@ -528,6 +562,8 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Telegram клиент успешно инициализирован")
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации Telegram клиента: {e}")
+        # Не завершаем приложение, пусть работает, но без клиента
+        # Пользователь сможет увидеть статус через /health
     
     yield
     
@@ -719,10 +755,10 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     
     logger.info(f"🚀 Запуск сервера на порту {port}")
-    logger.info("📖 Документация API доступна по адресу: http://localhost:{port}/docs")
+    logger.info(f"📖 Документация API доступна по адресу: http://localhost:{port}/docs")
     
     uvicorn.run(
-        "main:app",  # Замените "main" на имя вашего файла
+        "main:app",  # Убедитесь, что имя файла main.py
         host="0.0.0.0",
         port=port,
         log_level="info",

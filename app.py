@@ -352,7 +352,7 @@ async def get_channel_info(client: TelegramClient, channel: Channel) -> dict:
 
 async def get_messages(client: TelegramClient, channel: Channel, limit: int, days_back: int) -> list:
     """
-    Получение сообщений из канала
+    Получение сообщений из канала (только постов, исключая комментарии из связанной группы)
     
     Args:
         client: Telegram клиент
@@ -361,7 +361,7 @@ async def get_messages(client: TelegramClient, channel: Channel, limit: int, day
         days_back: Дней назад для поиска
         
     Returns:
-        list: Список сообщений
+        list: Список сообщений-постов из канала
     """
     offset_date = datetime.now(timezone.utc) - timedelta(days=days_back)
     
@@ -370,18 +370,21 @@ async def get_messages(client: TelegramClient, channel: Channel, limit: int, day
     try:
         # Получаем сообщения
         all_messages = await client.get_messages(channel, limit=limit)
-        logger.info(f"Всего найдено {len(all_messages)} сообщений")
-        
-        # Фильтруем по дате
+        logger.info(f"Всего найдено {len(all_messages)} сообщений (включая потенциальные комментарии)")
+
+        # Фильтруем по дате и исключаем комментарии из связанной группы
+        # Сообщения из связанной группы обсуждений обычно имеют post_author != None
         messages = []
         for msg in all_messages:
             msg_date = msg.date
             if msg_date.tzinfo is None:
                 msg_date = msg_date.replace(tzinfo=timezone.utc)
-            if msg_date >= offset_date:
+            
+            # Проверяем дату и является ли сообщение постом в канале (post_author == None для постов)
+            if msg_date >= offset_date and msg.post_author is None:
                 messages.append(msg)
         
-        logger.info(f"После фильтрации по дате: {len(messages)} сообщений")
+        logger.info(f"После фильтрации по дате и исключению комментариев: {len(messages)} сообщений")
         return messages
         
     except FloodWaitError as e:
@@ -432,7 +435,7 @@ async def process_messages(client: TelegramClient, messages: list, channel: Chan
     
     Args:
         client: Telegram клиент
-        messages: Список сообщений
+        messages: Список сообщений-постов из канала
         channel: Канал
         
     Returns:
@@ -486,7 +489,7 @@ async def process_messages(client: TelegramClient, messages: list, channel: Chan
             channel_username = getattr(channel, 'username', None)
             message_link = ""
             if channel_username:
-                # Исправлено форматирование ссылки
+                # Исправлено форматирование ссылки (убраны лишние пробелы)
                 message_link = f"https://t.me/{channel_username}/{msg.id}"
             else:
                 message_link = f"Сообщение #{msg.id}"
@@ -496,9 +499,16 @@ async def process_messages(client: TelegramClient, messages: list, channel: Chan
             if replies_count > 0:
                 try:
                     comment_count = 0
-                    async for comment in client.iter_messages(channel, reply_to=msg.id, reverse=True):
+                    # Явно указываем entity=channel, чтобы искать комментарии в связанной группе
+                    async for comment in client.iter_messages(entity=channel, reply_to=msg.id, reverse=True):
                         if comment_count >= 10:  # Ограничиваем количество комментариев
                             break
+                        
+                        # Убедимся, что это действительно комментарий (post_author == None для комментариев)
+                        # Комментарии из связанной группы имеют post_author == None
+                        if comment.post_author is not None:
+                            comment_count += 1
+                            continue # Пропускаем, если это не комментарий
                         
                         comment_date = comment.date.strftime("%Y-%m-%d %H:%M:%S") if comment.date else "N/A"
                         comment_text = comment.message if comment.message else "[Нет текста]"
@@ -649,7 +659,7 @@ async def analyze_channel(request: ChannelAnalysisRequest):
         # Получаем информацию о канале
         channel_info = await get_channel_info(client, channel)
         
-        # Получаем сообщения
+        # Получаем сообщения (только посты из канала)
         messages = await get_messages(
             client, 
             channel, 

@@ -352,7 +352,7 @@ async def get_channel_info(client: TelegramClient, channel: Channel) -> dict:
 
 async def get_messages(client: TelegramClient, channel: Channel, limit: int, days_back: int) -> list:
     """
-    Получение сообщений из канала (только постов, исключая комментарии из связанной группы)
+    Получение сообщений из канала (только посты, исключая комментарии из связанной группы)
     
     Args:
         client: Telegram клиент

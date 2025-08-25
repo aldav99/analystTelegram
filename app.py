@@ -1,9 +1,10 @@
 # main.py
 """
-🚀 Telegram Channel Analyzer FastAPI
-====================================
+🚀 Telegram Channel Analyzer FastAPI - Simplified Version
+========================================================
 Веб-сервис для анализа Telegram каналов с помощью FastAPI.
-Извлекает статистику сообщений: просмотры, комментарии, реакции, пересылки.
+Извлекает статистику сообщений: просмотры, реакции, пересылки и текст постов.
+Без комментариев - только основные посты канала.
 Автор: AI Assistant
 Дата: 2025
 """
@@ -58,7 +59,7 @@ class ChannelAnalysisRequest(BaseModel):
     """Модель запроса для анализа канала"""
     channel_username: str = Field(
         ..., 
-        description="Username канала (например: @mychannel или mychannel)",
+        description="Username канала (например: @DavBlog или DavBlog)",
         min_length=1,
         max_length=100
     )
@@ -97,22 +98,10 @@ class PostInfo(BaseModel):
     date: str
     type: str
     views: int
-    comments: int
     reactions: int
     forwards: int
     content: str
     url: str
-
-class Comment(BaseModel):
-    """Информация о комментарии"""
-    author: str
-    date: str
-    text: str
-
-class MessageData(BaseModel):
-    """Данные сообщения"""
-    post_info: PostInfo
-    comments: List[Comment]
 
 class ChannelAnalysisResponse(BaseModel):
     """Ответ анализа канала"""
@@ -123,7 +112,7 @@ class ChannelAnalysisResponse(BaseModel):
     subscribers_count: Optional[int]
     analysis_period: str
     total_messages_analyzed: int
-    messages: Dict[str, MessageData]
+    posts: Dict[str, PostInfo]
     analysis_timestamp: str
 
 class HealthResponse(BaseModel):
@@ -132,13 +121,6 @@ class HealthResponse(BaseModel):
     timestamp: str
     telegram_client_status: str
     version: str = "1.0.0"
-
-class ErrorResponse(BaseModel):
-    """Модель ответа об ошибке"""
-    success: bool = False
-    error: str
-    error_code: str
-    timestamp: str
 
 # ==============================================================================
 # 🔐 УПРАВЛЕНИЕ КРЕДЕНЦИАЛАМИ TELEGRAM
@@ -185,8 +167,6 @@ def get_telegram_credentials() -> tuple[str, str, str]:
 async def init_telegram_client() -> TelegramClient:
     """
     Инициализация и авторизация Telegram клиента.
-    Пытается использовать существующую сессию или воссоздать её из TELEGRAM_SESSION_BASE64.
-    Если сессия недействительна или отсутствует, начинает новую авторизацию.
     
     Returns:
         TelegramClient: Авторизованный клиент
@@ -209,23 +189,20 @@ async def init_telegram_client() -> TelegramClient:
                     session_data = base64.b64decode(session_b64)
                     with open(SESSION_FILE, 'wb') as f:
                         f.write(session_data)
-                    logger.info("Файл сессии воссоздан из переменной окружения TELEGRAM_SESSION_BASE64")
+                    logger.info("Файл сессии воссоздан из переменной окружения")
                     session_exists = True
                 except Exception as e:
-                    logger.error(f"Ошибка декодирования или записи файла сессии из переменной окружения: {e}")
-                    # Продолжаем, возможно, начнется новая авторизация
+                    logger.error(f"Ошибка декодирования сессии: {e}")
         
         # Создаем клиент
         client = TelegramClient(SESSION_NAME, int(api_id), api_hash)
         
-        # Подключаемся. Если сессия валидна, авторизация пройдет автоматически.
-        # Если файла не было и не удалось воссоздать, или сессия невалидна, начнется новая авторизация.
-        # Обрабатываем 2FA если нужно
+        # Подключаемся с обработкой 2FA
         password = os.getenv('TELEGRAM_2FA_PASSWORD')
         if password:
-             await client.start(phone, password=password)
+            await client.start(phone, password=password)
         else:
-             await client.start(phone)
+            await client.start(phone)
         
         # Проверяем авторизацию
         me = await client.get_me()
@@ -240,13 +217,13 @@ async def init_telegram_client() -> TelegramClient:
         )
     except Exception as e:
         logger.error(f"Ошибка инициализации Telegram клиента: {e}")
-        # Удаляем поврежденный файл сессии, если ошибка указывает на проблему с сессией
+        # Удаляем поврежденный файл сессии
         if os.path.exists(SESSION_FILE) and ("auth" in str(e).lower() or "invalid" in str(e).lower()):
-             try:
-                 os.remove(SESSION_FILE)
-                 logger.info("Поврежденный файл сессии удален.")
-             except Exception as rm_error:
-                 logger.warning(f"Не удалось удалить поврежденный файл сессии: {rm_error}")
+            try:
+                os.remove(SESSION_FILE)
+                logger.info("Поврежденный файл сессии удален.")
+            except Exception as rm_error:
+                logger.warning(f"Не удалось удалить поврежденный файл сессии: {rm_error}")
         raise Exception(f"Не удалось инициализировать Telegram клиент: {str(e)}")
 
 async def get_telegram_client() -> TelegramClient:
@@ -338,9 +315,9 @@ async def get_channel_info(client: TelegramClient, channel: Channel) -> dict:
     
     return info
 
-async def get_messages(client: TelegramClient, channel: Channel, limit: int, days_back: int) -> list:
+async def get_channel_messages(client: TelegramClient, channel: Channel, limit: int, days_back: int) -> list:
     """
-    Получение сообщений из канала (ТОЛЬКО основные посты канала)
+    Получение основных постов канала
     
     Args:
         client: Telegram клиент
@@ -349,41 +326,36 @@ async def get_messages(client: TelegramClient, channel: Channel, limit: int, day
         days_back: Дней назад для поиска
         
     Returns:
-        list: Список сообщений-постов из канала
+        list: Список основных постов канала
     """
     offset_date = datetime.now(timezone.utc) - timedelta(days=days_back)
     
     logger.info(f"Загружаем до {limit} сообщений за последние {days_back} дней")
     
     try:
-        # Получаем сообщения из самого канала
+        # Получаем сообщения из канала
         all_messages = await client.get_messages(channel, limit=limit)
         logger.info(f"Всего найдено {len(all_messages)} сообщений")
         
-        # ИСПРАВЛЕНИЕ: Фильтруем только основные посты канала
-        # Основные посты канала имеют:
-        # 1. reply_to_msg_id == None (не являются ответами/комментариями)
-        # 2. from_id == None (отправлены от имени канала)
-        # 3. post_author == None (не из связанной группы обсуждений)
-        
+        # Фильтруем только основные посты канала
         channel_posts = []
         for msg in all_messages:
             msg_date = msg.date
             if msg_date.tzinfo is None:
                 msg_date = msg_date.replace(tzinfo=timezone.utc)
             
-            # Проверяем дату и что это основной пост канала
+            # Проверяем что это основной пост канала в нужном периоде
             is_channel_post = (
-                msg_date >= offset_date and  # В нужном периоде
-                msg.reply_to_msg_id is None and  # Не является ответом/комментарием
-                msg.from_id is None and  # Отправлен от имени канала
-                msg.post_author is None  # Не из связанной группы обсуждений
+                msg_date >= offset_date and          # В нужном периоде
+                msg.reply_to_msg_id is None and      # Не является ответом
+                msg.from_id is None and              # Отправлен от имени канала
+                msg.post_author is None              # Не из связанной группы
             )
             
             if is_channel_post:
                 channel_posts.append(msg)
         
-        logger.info(f"После фильтрации основных постов канала: {len(channel_posts)} сообщений")
+        logger.info(f"После фильтрации основных постов: {len(channel_posts)} сообщений")
         return channel_posts
         
     except FloodWaitError as e:
@@ -400,15 +372,7 @@ async def get_messages(client: TelegramClient, channel: Channel, limit: int, day
         )
 
 def get_media_type(media) -> str:
-    """
-    Определение типа медиа
-    
-    Args:
-        media: Медиа объект
-        
-    Returns:
-        str: Тип медиа
-    """
+    """Определение типа медиа"""
     media_type = str(type(media).__name__)
     
     if 'Photo' in media_type:
@@ -426,147 +390,42 @@ def get_media_type(media) -> str:
     else:
         return "Медиа"
 
-async def get_discussion_group(client: TelegramClient, channel: Channel) -> Optional[Channel]:
+def process_channel_posts(messages: list, channel: Channel) -> dict:
     """
-    Получение связанной группы обсуждений для канала
+    Обработка постов канала и получение статистики
     
     Args:
-        client: Telegram клиент
+        messages: Список постов канала
         channel: Канал
         
     Returns:
-        Channel или None: Связанная группа обсуждений если есть
+        dict: Обработанные данные постов
     """
-    try:
-        full_channel = await client(GetFullChannelRequest(channel))
-        linked_chat_id = getattr(full_channel.full_chat, 'linked_chat_id', None)
-        
-        if linked_chat_id:
-            discussion_group = await client.get_entity(linked_chat_id)
-            logger.info(f"Найдена связанная группа обсуждений: {discussion_group.title}")
-            return discussion_group
-        else:
-            logger.info("У канала нет связанной группы обсуждений")
-            return None
-            
-    except Exception as e:
-        logger.warning(f"Не удалось получить связанную группу обсуждений: {e}")
-        return None
-
-async def get_post_comments(client: TelegramClient, channel: Channel, discussion_group: Optional[Channel], post_id: int, limit: int = 10) -> List[dict]:
-    """
-    Получение комментариев к конкретному посту
-    
-    Args:
-        client: Telegram клиент
-        channel: Основной канал
-        discussion_group: Группа обсуждений (может быть None)
-        post_id: ID поста в канале
-        limit: Максимальное количество комментариев
-        
-    Returns:
-        List[dict]: Список комментариев
-    """
-    comments_data = []
-    
-    if not discussion_group:
-        return comments_data
-    
-    try:
-        # Ищем комментарии в группе обсуждений
-        # Комментарии в группе обсуждений ссылаются на оригинальный пост через reply_to_msg_id
-        comment_count = 0
-        
-        async for comment in client.iter_messages(discussion_group, limit=100):
-            if comment_count >= limit:
-                break
-                
-            # ИСПРАВЛЕНИЕ: Проверяем что комментарий относится к нашему посту
-            if (hasattr(comment, 'reply_to_msg_id') and 
-                comment.reply_to_msg_id == post_id and
-                comment.from_id is not None):  # Комментарий от пользователя
-                
-                comment_date = comment.date
-                if comment_date.tzinfo is None:
-                    comment_date = comment_date.replace(tzinfo=timezone.utc)
-                formatted_date = comment_date.strftime("%Y-%m-%d %H:%M:%S")
-                
-                comment_text = comment.message if comment.message else "[Нет текста]"
-                
-                # Обрезаем длинные комментарии
-                if len(comment_text) > 100:
-                    comment_text = comment_text[:100] + "..."
-                
-                # Получаем автора комментария
-                author_info = "Unknown"
-                if comment.from_id:
-                    try:
-                        author = await client.get_entity(comment.from_id)
-                        if hasattr(author, 'username') and author.username:
-                            author_info = f"@{author.username}"
-                        elif hasattr(author, 'first_name'):
-                            author_info = author.first_name
-                            if hasattr(author, 'last_name') and author.last_name:
-                                author_info += f" {author.last_name}"
-                        else:
-                            author_info = f"User_{comment.from_id.user_id}"
-                    except Exception as e:
-                        logger.warning(f"Не удалось получить информацию об авторе комментария: {e}")
-                        author_info = f"User_{comment.from_id.user_id if hasattr(comment.from_id, 'user_id') else 'Unknown'}"
-                
-                comments_data.append({
-                    'author': author_info,
-                    'date': formatted_date,
-                    'text': comment_text
-                })
-                comment_count += 1
-                
-    except Exception as e:
-        logger.warning(f"Ошибка получения комментариев для поста {post_id}: {e}")
-    
-    logger.info(f"Найдено {len(comments_data)} комментариев для поста {post_id}")
-    return comments_data
-
-async def process_messages(client: TelegramClient, messages: list, channel: Channel) -> dict:
-    """
-    Обработка сообщений и получение статистики включая комментарии
-    
-    Args:
-        client: Telegram клиент
-        messages: Список сообщений-постов из канала
-        channel: Канал
-        
-    Returns:
-        dict: Обработанные данные сообщений
-    """
-    data = {}
+    posts_data = {}
     processed_count = 0
     
-    logger.info(f"Начинаем обработку {len(messages)} сообщений")
-    
-    # Получаем связанную группу обсуждений один раз
-    discussion_group = await get_discussion_group(client, channel)
+    logger.info(f"Начинаем обработку {len(messages)} постов")
     
     for i, msg in enumerate(reversed(messages), 1):
         try:
-            # Определяем тип сообщения и содержание
-            msg_type = "текст"
+            # Определяем тип поста и содержание
+            post_type = "Текст"
             content = ""
             
             if hasattr(msg, 'message') and msg.message:
-                content = msg.message[:200] + "..." if len(msg.message) > 200 else msg.message
+                content = msg.message
+                if hasattr(msg, 'media') and msg.media:
+                    post_type = get_media_type(msg.media)
+                    content = f"[{post_type}] {content}"
             elif hasattr(msg, 'media') and msg.media:
-                msg_type = get_media_type(msg.media)
-                content = f"[{msg_type}]"
+                post_type = get_media_type(msg.media)
+                content = f"[{post_type}]"
             else:
-                msg_type = "прочее"
+                post_type = "Служебное"
                 content = "[Служебное сообщение]"
             
-            # Получаем статистику сообщения
+            # Получаем статистику поста
             views_count = getattr(msg, 'views', 0) or 0
-            replies_count = 0
-            if hasattr(msg, 'replies') and msg.replies:
-                replies_count = getattr(msg.replies, 'replies', 0) or 0
             
             # Получаем количество реакций
             reactions_count = 0
@@ -585,46 +444,37 @@ async def process_messages(client: TelegramClient, messages: list, channel: Chan
                 msg_date = msg_date.replace(tzinfo=timezone.utc)
             formatted_date = msg_date.strftime("%Y-%m-%d %H:%M:%S")
             
-            # Создаем ссылку на сообщение
+            # Создаем ссылку на пост
             channel_username = getattr(channel, 'username', None)
-            message_link = ""
+            post_link = ""
             if channel_username:
-                message_link = f"https://t.me/{channel_username}/{msg.id}"
+                post_link = f"https://t.me/{channel_username}/{msg.id}"
             else:
-                message_link = f"Сообщение #{msg.id}"
+                post_link = f"Пост #{msg.id}"
             
-            # ИСПРАВЛЕНИЕ: Получение комментариев из связанной группы обсуждений
-            comments_data = []
-            if replies_count > 0 and discussion_group:
-                comments_data = await get_post_comments(client, channel, discussion_group, msg.id, limit=10)
-            
-            # Добавляем данные сообщения
-            data[str(msg.id)] = {
-                'post_info': {
-                    'date': formatted_date,
-                    'type': msg_type,
-                    'views': views_count,
-                    'comments': replies_count,
-                    'reactions': reactions_count,
-                    'forwards': forwards_count,
-                    'content': content,
-                    'url': message_link
-                },
-                'comments': comments_data
+            # Добавляем данные поста
+            posts_data[str(msg.id)] = {
+                'date': formatted_date,
+                'type': post_type,
+                'views': views_count,
+                'reactions': reactions_count,
+                'forwards': forwards_count,
+                'content': content,
+                'url': post_link
             }
             
             processed_count += 1
             
-            # Логируем прогресс каждые 10 сообщений
+            # Логируем прогресс каждые 10 постов
             if i % 10 == 0:
-                logger.info(f"Обработано {i}/{len(messages)} сообщений")
+                logger.info(f"Обработано {i}/{len(messages)} постов")
                 
         except Exception as e:
-            logger.error(f"Ошибка обработки сообщения {msg.id}: {e}")
+            logger.error(f"Ошибка обработки поста {msg.id}: {e}")
             continue
     
-    logger.info(f"Обработано сообщений: {processed_count}")
-    return data
+    logger.info(f"Обработано постов: {processed_count}")
+    return posts_data
 
 # ==============================================================================
 # 🌐 LIFESPAN MANAGEMENT
@@ -642,8 +492,6 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Telegram клиент успешно инициализирован")
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации Telegram клиента: {e}")
-        # Не завершаем приложение, пусть работает, но без клиента
-        # Пользователь сможет увидеть статус через /health
     
     yield
     
@@ -683,7 +531,6 @@ async def health_check():
     
     try:
         if telegram_client and telegram_client.is_connected():
-            # Проверяем подключение к Telegram
             await telegram_client.get_me()
             client_status = "connected"
     except Exception as e:
@@ -701,18 +548,26 @@ async def analyze_channel(request: ChannelAnalysisRequest):
     """
     Анализ Telegram канала
     
-    Извлекает статистику сообщений канала включая:
+    Извлекает статистику постов канала:
     - Просмотры
-    - Комментарии  
     - Реакции
     - Пересылки
-    - Содержимое постов
+    - Полный текст постов
+    - Тип контента
     
     Args:
         request: Параметры запроса анализа
         
     Returns:
         ChannelAnalysisResponse: Результат анализа
+        
+    Example:
+        POST /analyze
+        {
+            "channel_username": "@DavBlog",
+            "limit_messages": 50,
+            "days_back": 7
+        }
     """
     start_time = datetime.now(timezone.utc)
     logger.info(f"Начинаем анализ канала: @{request.channel_username}")
@@ -727,8 +582,8 @@ async def analyze_channel(request: ChannelAnalysisRequest):
         # Получаем информацию о канале
         channel_info = await get_channel_info(client, channel)
         
-        # Получаем сообщения (только основные посты из канала)
-        messages = await get_messages(
+        # Получаем основные посты канала
+        messages = await get_channel_messages(
             client, 
             channel, 
             request.limit_messages, 
@@ -744,12 +599,12 @@ async def analyze_channel(request: ChannelAnalysisRequest):
                 subscribers_count=channel_info['subscribers_count'],
                 analysis_period=f"{request.days_back} дней",
                 total_messages_analyzed=0,
-                messages={},
+                posts={},
                 analysis_timestamp=start_time.isoformat()
             )
         
-        # Обрабатываем сообщения
-        processed_data = await process_messages(client, messages, channel)
+        # Обрабатываем посты
+        posts_data = process_channel_posts(messages, channel)
         
         end_time = datetime.now(timezone.utc)
         processing_time = (end_time - start_time).total_seconds()
@@ -763,8 +618,8 @@ async def analyze_channel(request: ChannelAnalysisRequest):
             channel_id=channel_info['id'],
             subscribers_count=channel_info['subscribers_count'],
             analysis_period=f"{request.days_back} дней",
-            total_messages_analyzed=len(processed_data),
-            messages=processed_data,
+            total_messages_analyzed=len(posts_data),
+            posts=posts_data,
             analysis_timestamp=start_time.isoformat()
         )
         
@@ -835,9 +690,9 @@ if __name__ == "__main__":
     logger.info(f"📖 Документация API доступна по адресу: http://localhost:{port}/docs")
     
     uvicorn.run(
-        "main:app",  # Убедитесь, что имя файла main.py
+        "main:app",
         host="0.0.0.0",
         port=port,
         log_level="info",
-        reload=False  # Установите True для разработки
+        reload=False
     )

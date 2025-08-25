@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 # Глобальные настройки
 LIMIT_MESSAGES = int(os.getenv("LIMIT_MESSAGES", "200"))  # Лимит сообщений
-DAYS_BACK = int(os.getenv("DAYS_BACK", "30"))            # Период анализа в днях
+DAYS_BACK = int(os.getenv("DAYS_BACK", "90"))            # Период анализа в днях
 SESSION_NAME = "telegram_analyzer_session"                # Имя файла сессии
 SESSION_FILE = f"{SESSION_NAME}.session"                  # Полный путь к файлу сессии
 
@@ -696,3 +696,4 @@ if __name__ == "__main__":
         log_level="info",
         reload=False
     )
+

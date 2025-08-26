@@ -332,23 +332,21 @@ async def get_channel_messages(client: TelegramClient, channel: Channel, limit: 
     logger.info(f"Загружаем до {limit} сообщений за последние {days_back} дней")
     
     try:
-        # Получаем сообщения из канала
+        # Получаем сообщения из канала с offset_date для эффективной фильтрации
         all_messages = await client.get_messages(channel, limit=limit, offset_date=offset_date)
         logger.info(f"Всего найдено {len(all_messages)} сообщений")
         
-        # Фильтруем только основные посты канала
+        # Фильтруем только основные посты канала (минимальная фильтрация)
         channel_posts = []
         for msg in all_messages:
             msg_date = msg.date
             if msg_date.tzinfo is None:
                 msg_date = msg_date.replace(tzinfo=timezone.utc)
             
-            # Упрощенная проверка что это пост канала в нужном периоде
+            # Минимальная фильтрация - только по дате и отсутствию ответа
             is_channel_post = (
-                msg_date >= offset_date and          # В нужном периоде
-                msg.reply_to_msg_id is None and      # Не является ответом
-                not msg.replies_thread_id and        # Не является частью темы обсуждения
-                (msg.post or msg.from_id is None)    # Является постом канала
+                msg_date >= offset_date and           # В нужном периоде
+                msg.reply_to_msg_id is None          # Не является ответом
             )
             
             if is_channel_post:

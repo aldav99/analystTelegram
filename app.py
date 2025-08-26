@@ -249,7 +249,7 @@ async def find_channel(client: TelegramClient, channel_username: str) -> Channel
     
     Args:
         client: Telegram клиент
-        channel_username: Имя пользователя канала
+        channel_username: Имя пользователя канала (сохраняет регистр)
         
     Returns:
         Channel: Найденный канал
@@ -258,48 +258,84 @@ async def find_channel(client: TelegramClient, channel_username: str) -> Channel
         HTTPException: При ошибках поиска канала
     """
     try:
-        # Добавляем @ если его нет
-        if not channel_username.startswith('@'):
-            channel_username = f'@{channel_username}'
+        # Сохраняем оригинальное имя для точного поиска
+        original_username = channel_username
         
-        target_channel = await client.get_entity(channel_username)
+        # Для поиска используем версию без @ и в нижнем регистре
+        search_username = original_username.lower()
+        if search_username.startswith('@'):
+            search_username = search_username[1:]
+        
+        logger.info(f"Ищем канал: {original_username} (поиск: {search_username})")
+        
+        # Пробуем найти канал через get_entity
+        try:
+            target_channel = await client.get_entity(f"@{search_username}")
+        except ValueError:
+            # Если не нашли по username, пробуем поиск по всему Telegram
+            logger.info(f"Канал @{search_username} не найден, пробуем поиск...")
+            search_results = await client.get_dialogs()
+            
+            for dialog in search_results:
+                if (hasattr(dialog.entity, 'username') and 
+                    dialog.entity.username and 
+                    dialog.entity.username.lower() == search_username):
+                    target_channel = dialog.entity
+                    break
+            else:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Канал @{original_username} не найден"
+                )
         
         # Проверяем что это именно канал
         if not isinstance(target_channel, Channel):
             raise HTTPException(
                 status_code=400,
-                detail=f"{channel_username} не является каналом"
+                detail=f"@{original_username} не является каналом"
             )
         
-        logger.info(f"Канал найден: {target_channel.title}")
+        # Проверяем совпадение username
+        actual_username = getattr(target_channel, 'username', '')
+        if actual_username.lower() != search_username:
+            logger.warning(f"Найден канал @{actual_username} вместо @{original_username}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Канал @{original_username} не найден. Найден канал @{actual_username}"
+            )
+        
+        logger.info(f"Канал найден: {target_channel.title} (@{actual_username})")
         return target_channel
         
     except ChannelPrivateError:
         raise HTTPException(
             status_code=403,
-            detail=f"Канал {channel_username} приватный или недоступен"
+            detail=f"Канал @{channel_username} приватный или недоступен"
         )
+    except HTTPException:
+        raise  # Перебрасываем HTTP исключения как есть
     except Exception as e:
-        logger.error(f"Ошибка поиска канала {channel_username}: {e}")
+        logger.error(f"Ошибка поиска канала @{channel_username}: {e}")
         raise HTTPException(
             status_code=404,
-            detail=f"Канал {channel_username} не найден: {str(e)}"
+            detail=f"Канал @{channel_username} не найден: {str(e)}"
         )
 
-async def get_channel_info(client: TelegramClient, channel: Channel) -> dict:
+async def get_channel_info(client: TelegramClient, channel: Channel, original_username: str = None) -> dict:
     """
     Получение информации о канале
     
     Args:
         client: Telegram клиент
         channel: Канал для анализа
+        original_username: Оригинальное имя пользователя (для сохранения регистра)
         
     Returns:
         dict: Информация о канале
     """
     info = {
         'title': channel.title,
-        'username': getattr(channel, 'username', None),
+        'username': original_username or getattr(channel, 'username', None),
         'id': channel.id,
         'subscribers_count': None
     }
@@ -572,11 +608,11 @@ async def analyze_channel(request: ChannelAnalysisRequest):
         # Получаем клиент
         client = await get_telegram_client()
         
-        # Находим канал
+        # Находим канал (сохраняем оригинальное имя)
         channel = await find_channel(client, request.channel_username)
         
-        # Получаем информацию о канале
-        channel_info = await get_channel_info(client, channel)
+        # Получаем информацию о канале, передавая оригинальное имя
+        channel_info = await get_channel_info(client, channel, request.channel_username)
         
         # Получаем основные посты канала
         messages = await get_channel_messages(
@@ -613,7 +649,7 @@ async def analyze_channel(request: ChannelAnalysisRequest):
         return ChannelAnalysisResponse(
             success=True,
             channel_title=channel_info['title'],
-            channel_username=channel_info['username'],
+            channel_username=channel_info['username'],  # Сохраняем оригинальный регистр
             channel_id=channel_info['id'],
             subscribers_count=channel_info['subscribers_count'],
             analysis_period=f"{request.days_back} дней",

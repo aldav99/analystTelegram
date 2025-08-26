@@ -314,6 +314,8 @@ async def get_channel_info(client: TelegramClient, channel: Channel) -> dict:
     
     return info
 
+# ==============================================================================
+
 async def get_channel_messages(client: TelegramClient, channel: Channel, limit: int, days_back: int) -> list:
     """
     Получение основных постов канала
@@ -336,14 +338,14 @@ async def get_channel_messages(client: TelegramClient, channel: Channel, limit: 
         all_messages = await client.get_messages(channel, limit=limit, offset_date=offset_date)
         logger.info(f"Всего найдено {len(all_messages)} сообщений")
         
-        # Фильтруем только основные посты канала (минимальная фильтрация)
+        # Минимальная фильтрация - только по дате и отсутствию ответа
         channel_posts = []
         for msg in all_messages:
             msg_date = msg.date
             if msg_date.tzinfo is None:
                 msg_date = msg_date.replace(tzinfo=timezone.utc)
             
-            # Минимальная фильтрация - только по дате и отсутствию ответа
+            # Минимальная фильтрация
             is_channel_post = (
                 msg_date >= offset_date and           # В нужном периоде
                 msg.reply_to_msg_id is None          # Не является ответом
@@ -367,6 +369,8 @@ async def get_channel_messages(client: TelegramClient, channel: Channel, limit: 
             status_code=500,
             detail=f"Ошибка получения сообщений: {str(e)}"
         )
+
+# ==============================================================================
 
 def get_media_type(media) -> str:
     """Определение типа медиа"""

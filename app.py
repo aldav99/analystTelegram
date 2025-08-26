@@ -338,20 +338,15 @@ async def get_channel_messages(client: TelegramClient, channel: Channel, limit: 
         all_messages = await client.get_messages(channel, limit=limit, offset_date=offset_date)
         logger.info(f"Всего найдено {len(all_messages)} сообщений")
         
-        # Минимальная фильтрация - только по дате и отсутствию ответа
+        # Упрощенная фильтрация - только по дате
         channel_posts = []
         for msg in all_messages:
             msg_date = msg.date
             if msg_date.tzinfo is None:
                 msg_date = msg_date.replace(tzinfo=timezone.utc)
             
-            # Минимальная фильтрация
-            is_channel_post = (
-                msg_date >= offset_date and           # В нужном периоде
-                msg.reply_to_msg_id is None          # Не является ответом
-            )
-            
-            if is_channel_post:
+            # Более мягкая фильтрация - только проверка даты
+            if msg_date >= offset_date:
                 channel_posts.append(msg)
         
         logger.info(f"После фильтрации основных постов: {len(channel_posts)} сообщений")
@@ -391,6 +386,7 @@ def get_media_type(media) -> str:
     else:
         return "Медиа"
 
+# ==============================================================================
 def process_channel_posts(messages: list, channel: Channel) -> dict:
     """
     Обработка постов канала и получение статистики
@@ -413,21 +409,22 @@ def process_channel_posts(messages: list, channel: Channel) -> dict:
             post_type = "Текст"
             content = ""
             
+            # Извлекаем текст сообщения
             if hasattr(msg, 'message') and msg.message:
-                content = msg.message
-                if hasattr(msg, 'media') and msg.media:
-                    post_type = get_media_type(msg.media)
-                    content = f"[{post_type}] {content}"
-            elif hasattr(msg, 'media') and msg.media:
-                post_type = get_media_type(msg.media)
-                content = f"[{post_type}]"
-            else:
-                # Даже если нет текста, это может быть пост
-                post_type = "Текст"
-                content = "[Пустой пост]" if not (hasattr(msg, 'media') and msg.media) else ""
-                if hasattr(msg, 'media') and msg.media:
-                    post_type = get_media_type(msg.media)
-                    content = f"[{post_type}]"
+                content = msg.message.strip()
+            
+            # Определяем тип медиа, если есть
+            if hasattr(msg, 'media') and msg.media:
+                media_type = get_media_type(msg.media)
+                post_type = media_type
+                if content:
+                    content = f"[{media_type}] {content}"
+                else:
+                    content = f"[{media_type}]"
+            
+            # Если нет ни текста, ни медиа, помечаем как пустой
+            if not content:
+                content = "[Пустой пост]"
             
             # Получаем статистику поста
             views_count = getattr(msg, 'views', 0) or 0
@@ -435,9 +432,11 @@ def process_channel_posts(messages: list, channel: Channel) -> dict:
             # Получаем количество реакций
             reactions_count = 0
             try:
-                if hasattr(msg, 'reactions') and msg.reactions and msg.reactions.results:
-                    reactions_count = sum([r.count for r in msg.reactions.results if r.count])
-            except:
+                if hasattr(msg, 'reactions') and msg.reactions and hasattr(msg.reactions, 'results'):
+                    if msg.reactions.results:
+                        reactions_count = sum([r.count for r in msg.reactions.results if hasattr(r, 'count') and r.count])
+            except Exception as e:
+                logger.warning(f"Ошибка получения реакций для поста {msg.id}: {e}")
                 reactions_count = 0
             
             # Получаем количество пересылок
@@ -449,7 +448,7 @@ def process_channel_posts(messages: list, channel: Channel) -> dict:
                 msg_date = msg_date.replace(tzinfo=timezone.utc)
             formatted_date = msg_date.strftime("%Y-%m-%d %H:%M:%S")
             
-            # Создаем ссылку на пост (исправлен URL)
+            # Создаем ссылку на пост
             channel_username = getattr(channel, 'username', None)
             post_link = ""
             if channel_username:
@@ -481,6 +480,7 @@ def process_channel_posts(messages: list, channel: Channel) -> dict:
     logger.info(f"Обработано постов: {processed_count}")
     return posts_data
 
+# ==============================================================================
 # ==============================================================================
 # 🌐 LIFESPAN MANAGEMENT
 # ==============================================================================

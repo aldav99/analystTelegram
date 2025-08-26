@@ -324,33 +324,21 @@ async def get_channel_messages(client: TelegramClient, channel: Channel, limit: 
         client: Telegram клиент
         channel: Канал
         limit: Лимит сообщений
-        days_back: Дней назад для поиска
+        days_back: Дней назад для поиска (игнорируется)
         
     Returns:
         list: Список основных постов канала
     """
-    offset_date = datetime.now(timezone.utc) - timedelta(days=days_back)
-    
-    logger.info(f"Загружаем до {limit} сообщений за последние {days_back} дней")
+    logger.info(f"Загружаем до {limit} последних сообщений")
     
     try:
-        # Получаем сообщения из канала с offset_date для эффективной фильтрации
-        all_messages = await client.get_messages(channel, limit=limit, offset_date=offset_date)
+        # Получаем последние сообщения без фильтрации по дате
+        all_messages = await client.get_messages(channel, limit=limit)
         logger.info(f"Всего найдено {len(all_messages)} сообщений")
         
-        # Упрощенная фильтрация - только по дате
-        channel_posts = []
-        for msg in all_messages:
-            msg_date = msg.date
-            if msg_date.tzinfo is None:
-                msg_date = msg_date.replace(tzinfo=timezone.utc)
-            
-            # Более мягкая фильтрация - только проверка даты
-            if msg_date >= offset_date:
-                channel_posts.append(msg)
-        
-        logger.info(f"После фильтрации основных постов: {len(channel_posts)} сообщений")
-        return channel_posts
+        # Возвращаем все сообщения без фильтрации
+        logger.info(f"Возвращаем все {len(all_messages)} сообщений без фильтрации")
+        return all_messages
         
     except FloodWaitError as e:
         logger.error(f"Превышен лимит запросов. Нужно подождать {e.seconds} секунд")
@@ -386,7 +374,6 @@ def get_media_type(media) -> str:
     else:
         return "Медиа"
 
-# ==============================================================================
 def process_channel_posts(messages: list, channel: Channel) -> dict:
     """
     Обработка постов канала и получение статистики
@@ -405,6 +392,9 @@ def process_channel_posts(messages: list, channel: Channel) -> dict:
     
     for i, msg in enumerate(reversed(messages), 1):
         try:
+            # Диагностика: логируем информацию о сообщении
+            logger.debug(f"Сообщение {i}: ID={msg.id}, Дата={msg.date}, Текст={getattr(msg, 'message', 'N/A')[:50]}...")
+            
             # Определяем тип поста и содержание
             post_type = "Текст"
             content = ""
@@ -412,11 +402,13 @@ def process_channel_posts(messages: list, channel: Channel) -> dict:
             # Извлекаем текст сообщения
             if hasattr(msg, 'message') and msg.message:
                 content = msg.message.strip()
+                logger.debug(f"Найден текст: {content[:50]}...")
             
             # Определяем тип медиа, если есть
             if hasattr(msg, 'media') and msg.media:
                 media_type = get_media_type(msg.media)
                 post_type = media_type
+                logger.debug(f"Найден медиа: {media_type}")
                 if content:
                     content = f"[{media_type}] {content}"
                 else:
@@ -425,9 +417,11 @@ def process_channel_posts(messages: list, channel: Channel) -> dict:
             # Если нет ни текста, ни медиа, помечаем как пустой
             if not content:
                 content = "[Пустой пост]"
+                logger.debug("Пост без текста и медиа")
             
             # Получаем статистику поста
             views_count = getattr(msg, 'views', 0) or 0
+            logger.debug(f"Просмотры: {views_count}")
             
             # Получаем количество реакций
             reactions_count = 0
@@ -437,10 +431,11 @@ def process_channel_posts(messages: list, channel: Channel) -> dict:
                         reactions_count = sum([r.count for r in msg.reactions.results if hasattr(r, 'count') and r.count])
             except Exception as e:
                 logger.warning(f"Ошибка получения реакций для поста {msg.id}: {e}")
-                reactions_count = 0
+            logger.debug(f"Реакции: {reactions_count}")
             
-            # Получаем количество пересылок
+            # Получаем количество пересылки
             forwards_count = getattr(msg, 'forwards', 0) or 0
+            logger.debug(f"Пересылки: {forwards_count}")
             
             # Форматируем дату
             msg_date = msg.date
@@ -463,24 +458,20 @@ def process_channel_posts(messages: list, channel: Channel) -> dict:
                 'views': views_count,
                 'reactions': reactions_count,
                 'forwards': forwards_count,
-                'content': content[:1000],  # Ограничиваем длину контента
+                'content': content[:1000],
                 'url': post_link
             }
             
             processed_count += 1
+            logger.debug(f"Пост {msg.id} успешно обработан")
             
-            # Логируем прогресс каждые 10 постов
-            if i % 10 == 0:
-                logger.info(f"Обработано {i}/{len(messages)} постов")
-                
         except Exception as e:
             logger.error(f"Ошибка обработки поста {msg.id}: {e}")
             continue
     
-    logger.info(f"Обработано постов: {processed_count}")
+    logger.info(f"Успешно обработано постов: {processed_count}/{len(messages)}")
     return posts_data
 
-# ==============================================================================
 # ==============================================================================
 # 🌐 LIFESPAN MANAGEMENT
 # ==============================================================================
@@ -595,7 +586,10 @@ async def analyze_channel(request: ChannelAnalysisRequest):
             request.days_back
         )
         
+        logger.info(f"Получено {len(messages)} сообщений для обработки")
+        
         if not messages:
+            logger.warning("Не найдено ни одного сообщения для анализа")
             return ChannelAnalysisResponse(
                 success=True,
                 channel_title=channel_info['title'],
@@ -614,7 +608,7 @@ async def analyze_channel(request: ChannelAnalysisRequest):
         end_time = datetime.now(timezone.utc)
         processing_time = (end_time - start_time).total_seconds()
         
-        logger.info(f"Анализ завершен за {processing_time:.2f} секунд")
+        logger.info(f"Анализ завершен за {processing_time:.2f} секунд. Обработано {len(posts_data)} постов")
         
         return ChannelAnalysisResponse(
             success=True,
@@ -629,7 +623,6 @@ async def analyze_channel(request: ChannelAnalysisRequest):
         )
         
     except HTTPException:
-        # Переброс HTTP исключений как есть
         raise
     except Exception as e:
         logger.error(f"Неожиданная ошибка анализа: {e}")

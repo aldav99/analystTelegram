@@ -399,18 +399,19 @@ def get_media_type(media) -> str:
     
     if 'Photo' in media_type:
         return "Фото"
-    elif 'Video' в media_type or 'Document' в media_type:
+    elif 'Video' in media_type or 'Document' in media_type:
         return "Видео/Документ"
-    elif 'Audio' в media_type:
+    elif 'Audio' in media_type:
         return "Аудио"
-    elif 'Sticker' в media_type:
+    elif 'Sticker' in media_type:
         return "Стикер"
-    elif 'Poll' в media_type:
+    elif 'Poll' in media_type:
         return "Опрос"
-    elif 'WebPage' в media_type:
+    elif 'WebPage' in media_type:
         return "Веб-страница"
     else:
         return "Медиа"
+# ==============================================================================
 
 def process_channel_posts(messages: list, channel: Channel) -> dict:
     """

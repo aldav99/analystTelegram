@@ -320,39 +320,56 @@ async def get_channel_messages(client: TelegramClient, channel: Channel, limit: 
             detail=f"Ошибка получения сообщений: {str(e)}"
         )
 
-async def process_comment_message(client: TelegramClient, message) -> CommentInfo:
+async def process_comment_message(client: TelegramClient, message) -> Optional[CommentInfo]:
     """Обработка отдельного комментария"""
-    author_name = "Unknown"
-    if message.sender_id:
-        try:
-            sender = await client.get_entity(message.sender_id)
-            if hasattr(sender, 'first_name'):
-                author_name = sender.first_name
-                if hasattr(sender, 'last_name') and sender.last_name:
-                    author_name += f" {sender.last_name}"
-            elif hasattr(sender, 'username') and sender.username:
-                author_name = f"@{sender.username}"
-            elif hasattr(sender, 'title'):
-                author_name = sender.title
-        except Exception as e:
-            logger.debug(f"Не удалось получить информацию об авторе {message.sender_id}: {e}")
-    
-    msg_date = message.date
-    if msg_date.tzinfo is None:
-        msg_date = msg_date.replace(tzinfo=timezone.utc)
-    formatted_date = msg_date.strftime("%Y-%m-%d %H:%M:%S")
-    
-    text = getattr(message, 'message', '').strip()
-    if not text and hasattr(message, 'media') and message.media:
-        text = f"[{get_media_type(message.media)}]"
-    elif not text:
-        text = "[Комментарий]"
-    
-    return CommentInfo(
-        author=author_name,
-        date=formatted_date,
-        text=text[:500]
-    )
+    try:
+        author_name = "Unknown"
+        if message.sender_id:
+            try:
+                sender = await client.get_entity(message.sender_id)
+                if hasattr(sender, 'first_name'):
+                    author_name = sender.first_name
+                    if hasattr(sender, 'last_name') and sender.last_name:
+                        author_name += f" {sender.last_name}"
+                elif hasattr(sender, 'username') and sender.username:
+                    author_name = f"@{sender.username}"
+                elif hasattr(sender, 'title'):
+                    author_name = sender.title
+            except Exception as e:
+                logger.debug(f"Не удалось получить информацию об авторе {message.sender_id}: {e}")
+        
+        msg_date = message.date
+        if msg_date.tzinfo is None:
+            msg_date = msg_date.replace(tzinfo=timezone.utc)
+        formatted_date = msg_date.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Получаем текст комментария
+        text = getattr(message, 'message', '').strip()
+        
+        # Если текста нет, проверяем наличие медиа
+        if not text:
+            if hasattr(message, 'media') and message.media:
+                media_type = get_media_type(message.media)
+                text = f"[{media_type}]"
+            else:
+                # Пропускаем полностью пустые комментарии
+                logger.debug(f"Пропускаем пустой комментарий {message.id}")
+                return None
+        
+        # Проверяем, что текст не состоит только из пробелов или спецсимволов
+        if not text or text.isspace() or text in ['[Медиа]', '[Комментарий]']:
+            logger.debug(f"Пропускаем неинформативный комментарий: '{text}'")
+            return None
+        
+        return CommentInfo(
+            author=author_name,
+            date=formatted_date,
+            text=text[:500]
+        )
+        
+    except Exception as e:
+        logger.warning(f"Ошибка обработки комментария: {e}")
+        return None
 
 async def get_all_discussion_messages(client: TelegramClient, discussion_group_id: int) -> List[Any]:
     """
@@ -402,41 +419,50 @@ def extract_post_id_from_text(text: str, channel_id: int) -> Optional[int]:
     
     return None
 
-async def find_comments_for_post(discussion_messages: List[Any], post_id: int, channel_id: int) -> List[CommentInfo]:
+async def find_comments_for_post(client: TelegramClient, discussion_messages: List[Any], post_id: int, channel_id: int) -> List[CommentInfo]:
     """
     Поиск комментариев для конкретного поста
     """
     comments = []
+    processed_message_ids = set()
     
     for message in discussion_messages:
         try:
+            message_id = getattr(message, 'id', None)
+            if message_id in processed_message_ids:
+                continue
+                
+            processed_message_ids.add(message_id)
+            
+            comment = None
+            
             # Метод 1: Проверка reply_to_msg_id
             if (hasattr(message, 'reply_to') and 
                 hasattr(message.reply_to, 'reply_to_msg_id') and
                 message.reply_to.reply_to_msg_id == post_id):
                 
-                comment = await process_comment_message(None, message)
-                comments.append(comment)
-                continue
+                comment = await process_comment_message(client, message)
             
             # Метод 2: Проверка пересланных сообщений
-            if (hasattr(message, 'fwd_from') and
-                hasattr(message.fwd_from, 'channel_id') and
-                message.fwd_from.channel_id == channel_id and
-                hasattr(message.fwd_from, 'channel_post') and
-                message.fwd_from.channel_post == post_id):
+            elif (hasattr(message, 'fwd_from') and
+                  hasattr(message.fwd_from, 'channel_id') and
+                  message.fwd_from.channel_id == channel_id and
+                  hasattr(message.fwd_from, 'channel_post') and
+                  message.fwd_from.channel_post == post_id):
                 
-                comment = await process_comment_message(None, message)
-                comments.append(comment)
-                continue
+                comment = await process_comment_message(client, message)
             
             # Метод 3: Поиск по тексту (ссылкам на пост)
-            text = getattr(message, 'message', '')
-            extracted_post_id = extract_post_id_from_text(text, channel_id)
-            if extracted_post_id == post_id:
-                comment = await process_comment_message(None, message)
+            elif hasattr(message, 'message') and message.message:
+                text = message.message
+                extracted_post_id = extract_post_id_from_text(text, channel_id)
+                if extracted_post_id == post_id:
+                    comment = await process_comment_message(client, message)
+            
+            # Добавляем комментарий, если он валидный
+            if comment:
                 comments.append(comment)
-                continue
+                logger.debug(f"Найден комментарий для поста {post_id}: {comment.text[:50]}...")
                 
         except Exception as e:
             logger.warning(f"Ошибка обработки сообщения {getattr(message, 'id', 'unknown')}: {e}")
@@ -457,7 +483,11 @@ async def get_post_comments(client: TelegramClient, discussion_group_id: int, po
         logger.info(f"Ищем комментарии для поста {post_id}")
         
         # Используем предзагруженные сообщения для поиска
-        comments = await find_comments_for_post(discussion_messages, post_id, channel_id)
+        comments = await find_comments_for_post(client, discussion_messages, post_id, channel_id)
+        
+        # Логируем детали найденных комментариев
+        for i, comment in enumerate(comments, 1):
+            logger.debug(f"Комментарий {i} к посту {post_id}: {comment.text[:50]}...")
         
         logger.info(f"Найдено {len(comments)} комментариев к посту {post_id}")
         
@@ -507,13 +537,14 @@ async def process_channel_posts_with_comments(
     discussion_messages = []
     if include_comments and discussion_group_id:
         discussion_messages = await get_all_discussion_messages(client, discussion_group_id)
+        logger.info(f"Загружено {len(discussion_messages)} сообщений для анализа комментариев")
     
     for i, msg in enumerate(reversed(messages), 1):
         try:
             if isinstance(msg, MessageService):
                 continue
             
-            logger.debug(f"Сообщение {i}: ID={msg.id}, Дата={msg.date}")
+            logger.info(f"Обрабатываем пост {i}: ID={msg.id}, Дата={msg.date}")
             
             post_type = "Текст"
             content = ""
@@ -559,9 +590,16 @@ async def process_channel_posts_with_comments(
             comments_count = 0
             comments_list = []
             
-            if include_comments and discussion_group_id:
+            if include_comments and discussion_group_id and discussion_messages:
                 comments_list = await get_post_comments(client, discussion_group_id, msg.id, channel.id, discussion_messages)
                 comments_count = len(comments_list)
+                
+                # Детальное логирование комментариев
+                if comments_list:
+                    for j, comment in enumerate(comments_list, 1):
+                        logger.info(f"Пост {msg.id}, комментарий {j}: '{comment.text}'")
+                else:
+                    logger.info(f"Для поста {msg.id} комментарии не найдены")
             
             post_info = PostInfo(
                 date=formatted_date,
@@ -617,7 +655,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Telegram Channel Analyzer with Comments",
     description="🤖 API для анализа статистики Telegram каналов с комментариями",
-    version="1.2.0",
+    version="1.3.0",
     lifespan=lifespan
 )
 
@@ -742,7 +780,7 @@ async def get_status():
         
         return {
             "service": "Telegram Channel Analyzer with Comments",
-            "version": "1.2.0",
+            "version": "1.3.0",
             "status": "running",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "telegram_client": client_info,

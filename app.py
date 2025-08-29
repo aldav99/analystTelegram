@@ -371,123 +371,20 @@ async def process_comment_message(client: TelegramClient, message) -> Optional[C
         logger.warning(f"Ошибка обработки комментария: {e}")
         return None
 
-async def get_all_discussion_messages(client: TelegramClient, discussion_group_id: int) -> List[Any]:
+async def get_post_comments(client: TelegramClient, entity: Union[Channel, str], post_id: int) -> List[CommentInfo]:
     """
-    Получение всех сообщений из группы обсуждений для анализа
-    """
-    messages = []
-    try:
-        if not discussion_group_id:
-            return messages
-            
-        discussion_group = await client.get_entity(discussion_group_id)
-        logger.info(f"Загружаем сообщения из группы обсуждений {discussion_group_id}")
-        
-        async for message in client.iter_messages(discussion_group, limit=500):
-            if not isinstance(message, MessageService):
-                messages.append(message)
-                
-        logger.info(f"Загружено {len(messages)} сообщений из группы обсуждений")
-        
-    except Exception as e:
-        logger.error(f"Ошибка загрузки сообщений из группы обсуждений: {e}")
-    
-    return messages
-
-def extract_post_id_from_text(text: str, channel_id: int) -> Optional[int]:
-    """
-    Извлечение ID поста из текста комментария
-    """
-    if not text:
-        return None
-    
-    # Паттерны для поиска ссылок на посты
-    patterns = [
-        rf't\.me/c/{channel_id}/(\d+)',
-        rf't\.me/\w+/(\d+)',
-        rf'/{channel_id}/(\d+)',
-        rf'#(\d+)'
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            try:
-                return int(match.group(1))
-            except (ValueError, TypeError):
-                continue
-    
-    return None
-
-async def find_comments_for_post(client: TelegramClient, discussion_messages: List[Any], post_id: int, channel_id: int) -> List[CommentInfo]:
-    """
-    Поиск комментариев для конкретного поста
+    Получение комментариев к посту из группы обсуждений с использованием iter_messages
     """
     comments = []
-    processed_message_ids = set()
     
-    for message in discussion_messages:
-        try:
-            message_id = getattr(message, 'id', None)
-            if message_id in processed_message_ids:
-                continue
-                
-            processed_message_ids.add(message_id)
-            
-            comment = None
-            
-            # Метод 1: Проверка reply_to_msg_id
-            if (hasattr(message, 'reply_to') and 
-                hasattr(message.reply_to, 'reply_to_msg_id') and
-                message.reply_to.reply_to_msg_id == post_id):
-                
-                comment = await process_comment_message(client, message)
-            
-            # Метод 2: Проверка пересланных сообщений
-            elif (hasattr(message, 'fwd_from') and
-                  hasattr(message.fwd_from, 'channel_id') and
-                  message.fwd_from.channel_id == channel_id and
-                  hasattr(message.fwd_from, 'channel_post') and
-                  message.fwd_from.channel_post == post_id):
-                
-                comment = await process_comment_message(client, message)
-            
-            # Метод 3: Поиск по тексту (ссылкам на пост)
-            elif hasattr(message, 'message') and message.message:
-                text = message.message
-                extracted_post_id = extract_post_id_from_text(text, channel_id)
-                if extracted_post_id == post_id:
-                    comment = await process_comment_message(client, message)
-            
-            # Добавляем комментарий, если он валидный
+    try:
+        logger.info(f"Ищем комментарии для поста {post_id}")
+        
+        async for message in client.iter_messages(entity, reply_to=post_id):
+            comment = await process_comment_message(client, message)
             if comment:
                 comments.append(comment)
                 logger.debug(f"Найден комментарий для поста {post_id}: {comment.text[:50]}...")
-                
-        except Exception as e:
-            logger.warning(f"Ошибка обработки сообщения {getattr(message, 'id', 'unknown')}: {e}")
-            continue
-    
-    return comments
-
-async def get_post_comments(client: TelegramClient, discussion_group_id: int, post_id: int, channel_id: int, discussion_messages: List[Any]) -> List[CommentInfo]:
-    """
-    Получение комментариев к посту из группы обсуждений
-    """
-    comments = []
-    
-    try:
-        if not discussion_group_id:
-            return comments
-        
-        logger.info(f"Ищем комментарии для поста {post_id}")
-        
-        # Используем предзагруженные сообщения для поиска
-        comments = await find_comments_for_post(client, discussion_messages, post_id, channel_id)
-        
-        # Логируем детали найденных комментариев
-        for i, comment in enumerate(comments, 1):
-            logger.debug(f"Комментарий {i} к посту {post_id}: {comment.text[:50]}...")
         
         logger.info(f"Найдено {len(comments)} комментариев к посту {post_id}")
         
@@ -532,12 +429,6 @@ async def process_channel_posts_with_comments(
     processed_count = 0
     
     logger.info(f"Начинаем обработку {len(messages)} постов с комментариями: {include_comments}")
-    
-    # Предзагружаем все сообщения из группы обсуждений один раз
-    discussion_messages = []
-    if include_comments and discussion_group_id:
-        discussion_messages = await get_all_discussion_messages(client, discussion_group_id)
-        logger.info(f"Загружено {len(discussion_messages)} сообщений для анализа комментариев")
     
     for i, msg in enumerate(reversed(messages), 1):
         try:
@@ -590,8 +481,8 @@ async def process_channel_posts_with_comments(
             comments_count = 0
             comments_list = []
             
-            if include_comments and discussion_group_id and discussion_messages:
-                comments_list = await get_post_comments(client, discussion_group_id, msg.id, channel.id, discussion_messages)
+            if include_comments and discussion_group_id:
+                comments_list = await get_post_comments(client, channel, msg.id)
                 comments_count = len(comments_list)
                 
                 # Детальное логирование комментариев

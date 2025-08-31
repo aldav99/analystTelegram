@@ -26,7 +26,7 @@ from telethon import TelegramClient
 from telethon.tl.functions.channels import GetFullChannelRequest
 from telethon.tl.types import Channel, Message, MessageService
 from telethon.errors import SessionPasswordNeededError, FloodWaitError, ChannelPrivateError
-from telethon.tl.types import InputPeerChannel, InputMessagesFilterEmpty
+from telethon.tl.types import InputPeerChannel
 
 # Uvicorn для запуска сервера
 import uvicorn
@@ -319,13 +319,11 @@ async def get_channel_messages(client: TelegramClient, channel: Channel, start_d
         start = datetime.strptime(start_date, '%d.%m.%Y').replace(tzinfo=timezone.utc)
         end = datetime.strptime(end_date, '%d.%m.%Y').replace(tzinfo=timezone.utc) + timedelta(days=1) - timedelta(seconds=1)
         
-        all_messages = []
-        async for message in client.iter_messages(channel, min_date=start, max_date=end):
-            if not isinstance(message, MessageService):
-                all_messages.append(message)
-        logger.info(f"Всего найдено {len(all_messages)} сообщений")
+        all_messages = await client.get_messages(channel, limit=1000)  # Ограничение по количеству сообщений
+        filtered_messages = [msg for msg in all_messages if start <= msg.date.replace(tzinfo=timezone.utc) <= end]
         
-        return all_messages
+        logger.info(f"Всего найдено {len(filtered_messages)} сообщений в указанном диапазоне")
+        return filtered_messages
         
     except FloodWaitError as e:
         logger.error(f"Превышен лимит запросов. Нужно подождать {e.seconds} секунд")

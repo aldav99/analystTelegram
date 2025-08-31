@@ -2,7 +2,7 @@
 🚀 Telegram Channel Analyzer FastAPI with Comments
 ========================================================
 Веб-сервис для анализа Telegram каналов с комментариями из группы обсуждений.
-Извлекает статистику сообщений и комментарии к постам.
+Извлекает статистику сообщений и комментарии к постам за указанный период.
 Автор: AI Assistant
 Дата: 2025
 """
@@ -43,8 +43,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Глобальные настройки
-LIMIT_MESSAGES = int(os.getenv("LIMIT_MESSAGES", "200"))
-DAYS_BACK = int(os.getenv("DAYS_BACK", "90"))
 SESSION_NAME = "telegram_analyzer_session"
 SESSION_FILE = f"{SESSION_NAME}.session"
 
@@ -81,17 +79,13 @@ class ChannelAnalysisRequest(BaseModel):
         min_length=1,
         max_length=100
     )
-    limit_messages: Optional[int] = Field(
-        default=LIMIT_MESSAGES,
-        description="Максимальное количество сообщений для анализа",
-        ge=1,
-        le=1000
+    start_date: str = Field(
+        ..., 
+        description="Дата начала поиска в формате DD.MM.YYYY"
     )
-    days_back: Optional[int] = Field(
-        default=DAYS_BACK,
-        description="Количество дней назад для поиска сообщений",
-        ge=1,
-        le=365
+    end_date: str = Field(
+        ..., 
+        description="Дата окончания поиска в формате DD.MM.YYYY"
     )
     include_comments: Optional[bool] = Field(
         default=True,
@@ -110,6 +104,26 @@ class ChannelAnalysisRequest(BaseModel):
         if not v.replace('_', '').replace('-', '').isalnum():
             raise ValueError("Имя канала содержит недопустимые символы")
             
+        return v
+
+    @validator('start_date', 'end_date')
+    def validate_date_format(cls, v):
+        try:
+            datetime.strptime(v, '%d.%m.%Y')
+            return v
+        except ValueError:
+            raise ValueError("Дата должна быть в формате DD.MM.YYYY")
+
+    @validator('end_date', pre=True)
+    def check_date_range(cls, v, values):
+        start_date = values.get('start_date')
+        if start_date:
+            start = datetime.strptime(start_date, '%d.%m.%Y')
+            end = datetime.strptime(v, '%d.%m.%Y')
+            if end < start:
+                raise ValueError("Дата окончания не может быть раньше даты начала")
+            if (end - start).days > 365:
+                raise ValueError("Период не может превышать 365 дней")
         return v
 
 class ChannelAnalysisResponse(BaseModel):
@@ -298,11 +312,17 @@ async def get_channel_info(client: TelegramClient, channel: Channel, original_us
     
     return info
 
-async def get_channel_messages(client: TelegramClient, channel: Channel, limit: int, days_back: int) -> list:
-    logger.info(f"Загружаем до {limit} последних сообщений")
+async def get_channel_messages(client: TelegramClient, channel: Channel, start_date: str, end_date: str) -> list:
+    logger.info(f"Загружаем сообщения с {start_date} по {end_date}")
     
     try:
-        all_messages = await client.get_messages(channel, limit=limit)
+        start = datetime.strptime(start_date, '%d.%m.%Y').replace(tzinfo=timezone.utc)
+        end = datetime.strptime(end_date, '%d.%m.%Y').replace(tzinfo=timezone.utc) + timedelta(days=1) - timedelta(seconds=1)
+        
+        all_messages = []
+        async for message in client.iter_messages(channel, min_date=start, max_date=end):
+            if not isinstance(message, MessageService):
+                all_messages.append(message)
         logger.info(f"Всего найдено {len(all_messages)} сообщений")
         
         return all_messages
@@ -430,7 +450,7 @@ async def process_channel_posts_with_comments(
     
     logger.info(f"Начинаем обработку {len(messages)} постов с комментариями: {include_comments}")
     
-    for i, msg in enumerate(reversed(messages), 1):
+    for i, msg in enumerate(messages, 1):
         try:
             if isinstance(msg, MessageService):
                 continue
@@ -583,7 +603,7 @@ async def health_check():
 @app.post("/analyze", response_model=ChannelAnalysisResponse)
 async def analyze_channel(request: ChannelAnalysisRequest):
     start_time = datetime.now(timezone.utc)
-    logger.info(f"Начинаем анализ канала: @{request.channel_username} с комментариями: {request.include_comments}")
+    logger.info(f"Начинаем анализ канала: @{request.channel_username} с {request.start_date} по {request.end_date}")
     
     try:
         client = await get_telegram_client()
@@ -593,8 +613,8 @@ async def analyze_channel(request: ChannelAnalysisRequest):
         messages = await get_channel_messages(
             client, 
             channel, 
-            request.limit_messages, 
-            request.days_back
+            request.start_date, 
+            request.end_date
         )
         
         logger.info(f"Получено {len(messages)} сообщений для обработки")
@@ -608,7 +628,7 @@ async def analyze_channel(request: ChannelAnalysisRequest):
                 channel_id=channel_info['id'],
                 subscribers_count=channel_info['subscribers_count'],
                 discussion_group_id=channel_info['discussion_group_id'],
-                analysis_period=f"{request.days_back} дней",
+                analysis_period=f"{request.start_date} - {request.end_date}",
                 total_messages_analyzed=0,
                 posts={},
                 analysis_timestamp=start_time.isoformat()
@@ -634,7 +654,7 @@ async def analyze_channel(request: ChannelAnalysisRequest):
             channel_id=channel_info['id'],
             subscribers_count=channel_info['subscribers_count'],
             discussion_group_id=channel_info['discussion_group_id'],
-            analysis_period=f"{request.days_back} дней",
+            analysis_period=f"{request.start_date} - {request.end_date}",
             total_messages_analyzed=len(posts_data),
             posts=posts_data,
             analysis_timestamp=start_time.isoformat()
@@ -674,11 +694,7 @@ async def get_status():
             "version": "1.3.0",
             "status": "running",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "telegram_client": client_info,
-            "settings": {
-                "default_limit_messages": LIMIT_MESSAGES,
-                "default_days_back": DAYS_BACK
-            }
+            "telegram_client": client_info
         }
         
     except Exception as e:

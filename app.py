@@ -13,7 +13,7 @@ import logging
 import base64
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Any, Union
+from typing import List, Optional, Any, Union
 from contextlib import asynccontextmanager
 
 # FastAPI и Pydantic импорты
@@ -135,7 +135,7 @@ class ChannelAnalysisResponse(BaseModel):
     discussion_group_id: Optional[int]
     analysis_period: str
     total_messages_analyzed: int
-    posts: Dict[str, PostWithComments]
+    posts: List[PostWithComments]
     analysis_timestamp: str
 
 class HealthResponse(BaseModel):
@@ -442,8 +442,8 @@ async def process_channel_posts_with_comments(
     channel: Channel,
     discussion_group_id: Optional[int],
     include_comments: bool = True
-) -> dict:
-    posts_data = {}
+) -> List[PostWithComments]:
+    posts_data = []
     processed_count = 0
     
     logger.info(f"Начинаем обработку {len(messages)} постов с комментариями: {include_comments}")
@@ -521,9 +521,11 @@ async def process_channel_posts_with_comments(
                 url=post_link
             )
             
-            posts_data[str(msg.id)] = PostWithComments(
-                post_info=post_info,
-                comments=comments_list
+            posts_data.append(
+                PostWithComments(
+                    post_info=post_info,
+                    comments=comments_list
+                )
             )
             
             processed_count += 1
@@ -628,7 +630,7 @@ async def analyze_channel(request: ChannelAnalysisRequest):
                 discussion_group_id=channel_info['discussion_group_id'],
                 analysis_period=f"{request.start_date} - {request.end_date}",
                 total_messages_analyzed=0,
-                posts={},
+                posts=[],
                 analysis_timestamp=start_time.isoformat()
             )
         

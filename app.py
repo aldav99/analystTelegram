@@ -67,6 +67,7 @@ class PostInfo(BaseModel):
     forwards: int
     content: str
     url: str
+    comments_text: str = Field(..., description="Объединенный текст комментариев с разделителем '~~~~'")
 
 class PostWithComments(BaseModel):
     post_info: PostInfo
@@ -510,6 +511,9 @@ async def process_channel_posts_with_comments(
                 else:
                     logger.info(f"Для поста {msg.id} комментарии не найдены")
             
+            # Объединяем тексты комментариев с разделителем '~~~~'
+            comments_text = "~~~~".join(comment.text for comment in comments_list) if comments_list else ""
+            
             post_info = PostInfo(
                 date=formatted_date,
                 type=post_type,
@@ -518,7 +522,8 @@ async def process_channel_posts_with_comments(
                 reactions=reactions_count,
                 forwards=forwards_count,
                 content=content[:1000],
-                url=post_link
+                url=post_link,
+                comments_text=comments_text
             )
             
             posts_data.append(
